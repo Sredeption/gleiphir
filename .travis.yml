@@ -1,0 +1,16 @@
+language: go
+
+go:
+  - 1.9
+
+before_install:
+  - cd src
+  - curl https://glide.sh/get | sh
+
+install:
+  - glide install
+  - cd ..
+  - export GOPATH=`pwd`
+
+script:
+  - go test ./... -race

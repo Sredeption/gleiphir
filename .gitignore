@@ -1,0 +1,6 @@
+# Go
+pkg/
+src/vendor/
+
+# JetBrains
+.idea/
