@@ -34,10 +34,10 @@ func (s *Server) AddService(service *Service) {
 	s.rpcs.Register(service.receiver)
 }
 
-func (s *Server) start() {
-	l, e := net.Listen("unix", s.address)
+func (s *Server) Start() {
+	l, e := net.Listen("tcp", s.address)
 	if e != nil {
-		logger.Criticalf("RegistrationServer", s.address, " error: ", e)
+		logger.Critical("RegistrationServer", s.address, " error: ", e)
 	}
 	s.listener = l
 
@@ -62,7 +62,7 @@ loop:
 	logger.Infof("RegistrationServer: done\n")
 }
 
-func (s *Server) stop() error {
+func (s *Server) Stop() error {
 	logger.Infof("Shutdown: registration server\n")
 	close(s.shutdown)
 	s.listener.Close() // causes the Accept to fail

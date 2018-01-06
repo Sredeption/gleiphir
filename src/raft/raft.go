@@ -18,14 +18,13 @@ package raft
 //
 
 import (
+	"bytes"
+	"data"
+	"encoding/gob"
+	"github.com/op/go-logging"
+	"rpc"
 	"sync"
 	"time"
-	"math/rand"
-	"bytes"
-	"encoding/gob"
-	"rpc"
-	"data"
-	"github.com/op/go-logging"
 )
 
 var logger = logging.MustGetLogger("raft")
@@ -80,7 +79,7 @@ type Raft struct {
 
 	stateCond      *sync.Cond
 	commitCond     *sync.Cond
-	logReplicaChan *[] chan bool
+	logReplicaChan *[]chan bool
 	replicaEnd     sync.WaitGroup
 
 	snapshotBuffer    []byte
@@ -229,427 +228,11 @@ func (rf *Raft) readPersist(persister data.Persister) {
 
 }
 
-//
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-//
-type RequestVoteArgs struct {
-	Term         int
-	CandidateId  int
-	LastLogIndex int
-	LastLogTerm  int
-}
-
-//
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-//
-type RequestVoteReply struct {
-	Term        int
-	VoteGranted bool
-}
-
-// RequestVote RPC Handler
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error {
-
-	rf.stateCond.L.Lock()
-	if args.Term < *rf.CurrentTerm {
-		logger.Debugf("%s[%d] received a RequestVote from Candidate[%d] in Term[%d]. Send newer Term[%d] to force it step down.",
-			rf.state, rf.me, args.CandidateId, *rf.CurrentTerm, args.Term)
-		reply.Term = *rf.CurrentTerm
-		reply.VoteGranted = false
-	} else {
-		if args.Term > *rf.CurrentTerm {
-			logger.Debugf("Stale %s[%d] received a RequestVote from Candidate[%d] in Term[%d] with newer Term[%d]. Step down.",
-				rf.state, rf.me, args.CandidateId, *rf.CurrentTerm, args.Term)
-			*rf.CurrentTerm = args.Term
-			rf.VotedFor = nil
-			rf.toState(Follower)
-		}
-		reply.Term = *rf.CurrentTerm
-		if rf.VotedFor == nil {
-			lastIndex := rf.lastNewEntryIndex
-			//implement Election restriction
-			if lastIndex < 1 || args.LastLogTerm > rf.getEntry(lastIndex).Term || (args.LastLogTerm == rf.getEntry(lastIndex).Term && args.LastLogIndex >= lastIndex) {
-				logger.Debugf("%s[%d] grant a vote for the Candidate[%d], since it has a more up-to-date logs.",
-					rf.state, rf.me, args.CandidateId)
-				rf.VotedFor = new(int)
-				*rf.VotedFor = args.CandidateId
-				reply.VoteGranted = true
-				rf.leaderHeartBeat = true
-			} else {
-				logger.Debugf("%s[%d] declined RequestVote from the Candidate[%d], since it doesn't have a more up-to-date logs.",
-					rf.state, rf.me, args.CandidateId)
-				reply.VoteGranted = false
-			}
-		} else {
-			logger.Debugf("%s[%d] declined a RequestVote from Candidate[%d] in Term[%d], since it already grant vote to Candidate[%d]",
-				rf.state, rf.me, args.CandidateId, *rf.CurrentTerm, *rf.VotedFor)
-			reply.VoteGranted = false
-			rf.leaderHeartBeat = true
-		}
-	}
-	rf.stateCond.L.Unlock()
-	return nil
-}
-
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers.GetEnd(server).Call("Raft.RequestVote", args, reply)
-	rf.stateCond.L.Lock()
-
-	if ok {
-		if reply.Term > *rf.CurrentTerm {
-			logger.Debugf("%s[%d] received a RequestVoteReply in Term[%d] with newer Term[%d] from server[%d]. Step down",
-				rf.state, rf.me, *rf.CurrentTerm, reply.Term, server)
-			*rf.CurrentTerm = reply.Term
-			rf.toState(Follower)
-		} else if rf.state == Candidate && reply.Term == *rf.CurrentTerm {
-			if reply.VoteGranted {
-				rf.voteCount++
-				logger.Debugf("%s[%d] received a RequestVoteReply from server[%d]. It grant vote(%d/%d votes).",
-					rf.state, rf.me, server, rf.voteCount, rf.peers.Len())
-				if rf.voteCount > rf.peers.Len()/2 {
-					logger.Debugf("%s[%d] become Leader in Term[%d]", rf.state, rf.me, *rf.CurrentTerm)
-					rf.toState(Leader)
-					rf.initLeader()
-				}
-			} else {
-				logger.Debugf("%s[%d] received a RequestVoteReply from server[%d]. It decline vote.",
-					rf.state, rf.me, server)
-				rf.declined = true
-			}
-		}
-	}
-	rf.stateCond.L.Unlock()
-	return ok
-}
-
-type AppendEntriesArgs struct {
-	Term         int
-	LeaderId     int
-	PrevLogIndex int
-	PrevLogTerm  int
-	Entries      []Entry
-	LeaderCommit int
-}
-
-type AppendEntriesReply struct {
-	Term         int
-	Success      bool
-	Inconsistent bool
-	ConflictTerm int
-	FirstIndex   int
-}
-
-// AppendEntries RPC Handler
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) error {
-
-	rf.stateCond.L.Lock()
-	reply.Inconsistent = false
-	if args.Term < *rf.CurrentTerm {
-		logger.Debugf("%s[%d] received a AppendEntries from Stale Leader[%d] in Term[%d]. Send newer Term[%d] to force it step down.",
-			rf.state, rf.me, args.LeaderId, args.Term, *rf.CurrentTerm)
-		reply.Term = *rf.CurrentTerm
-		reply.Success = false
-	} else {
-		rf.leaderHeartBeat = true
-		if args.Term > *rf.CurrentTerm {
-			logger.Debugf("Stale %s[%d] received a AppendEntries from Leader[%d] in Term[%d] with newer Term[%d]. Step down.",
-				rf.state, rf.me, args.LeaderId, *rf.CurrentTerm, args.Term)
-			*rf.CurrentTerm = args.Term
-			rf.VotedFor = nil
-			rf.toState(Follower)
-		} else if rf.state == Candidate {
-			logger.Debugf("Stale %s[%d] received a AppendEntries from Leader[%d] in Term[%d]. Step down.",
-				rf.state, rf.me, args.LeaderId, *rf.CurrentTerm, args.Term)
-			rf.toState(Follower)
-		}
-		reply.Term = *rf.CurrentTerm
-		if rf.lastNewEntryIndex < args.PrevLogIndex || (args.PrevLogIndex >= rf.lastApplied && rf.getEntry(args.PrevLogIndex).Term != args.PrevLogTerm ) {
-			reply.Success = false
-			reply.Inconsistent = true
-			if rf.lastNewEntryIndex < args.PrevLogIndex {
-				reply.FirstIndex = rf.lastNewEntryIndex
-				reply.ConflictTerm = rf.getEntry(reply.FirstIndex).Term
-			} else {
-				reply.ConflictTerm = rf.getEntry(args.PrevLogIndex).Term
-				reply.FirstIndex = args.PrevLogIndex
-				for reply.FirstIndex > rf.lastSnapshotIndex && rf.getEntry(reply.FirstIndex - 1).Term == reply.ConflictTerm {
-					reply.FirstIndex -= 1
-				}
-			}
-
-			logger.Debugf("%s[%d] declined a AppendEntries from Leader[%d] since the Entry at PrevLogIndex doesn't match.",
-				rf.state, rf.me, args.LeaderId)
-		} else {
-			reply.Success = true
-			modifyFlag := args.PrevLogIndex+len(args.Entries) > rf.lastNewEntryIndex
-
-			for i, entry := range args.Entries {
-				if args.PrevLogIndex+i+1 <= rf.lastApplied {
-					continue
-				}
-				f := rf.appendEntry(args.PrevLogIndex+i+1, entry)
-				modifyFlag = modifyFlag || f
-			}
-			if modifyFlag {
-				rf.lastNewEntryIndex = args.PrevLogIndex + len(args.Entries)
-				rf.persist()
-			}
-			logger.Debugf("%s[%d] received a AppendEntries[len=%d] from Leader[%d] and update lastNewEntryIndex[%d]",
-				rf.state, rf.me, len(args.Entries), args.LeaderId, rf.lastNewEntryIndex)
-			if args.LeaderCommit > rf.commitIndex {
-				if args.LeaderCommit > rf.lastNewEntryIndex {
-					rf.commitIndex = rf.lastNewEntryIndex
-				} else {
-					rf.commitIndex = args.LeaderCommit
-				}
-				logger.Debugf("%s[%d] update new commitIndex[%d]", rf.state, rf.me, rf.commitIndex)
-				rf.commitCond.Broadcast()
-			}
-		}
-	}
-	rf.stateCond.L.Unlock()
-	return nil
-}
-
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers.GetEnd(server).Call("Raft.AppendEntries", args, reply)
-	rf.stateCond.L.Lock()
-	if ok && rf.state == Leader {
-		if reply.Term > *rf.CurrentTerm {
-			logger.Debugf("%s[%d] received a AppendEntriesReply in Term[%d] with newer Term[%d] from server[%d]. Step down.",
-				rf.state, rf.me, *rf.CurrentTerm, reply.Term, server)
-			*rf.CurrentTerm = reply.Term
-			rf.toState(Follower)
-			rf.leaderHeartBeat = true
-		} else if reply.Term == *rf.CurrentTerm {
-			if reply.Success {
-				if rf.nextIndex[server] < args.PrevLogIndex+len(args.Entries)+1 {
-					rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
-				}
-				if rf.matchIndex[server] < args.PrevLogIndex+len(args.Entries) {
-					rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
-					rf.updateCommitIndex()
-					rf.commitCond.Broadcast()
-				}
-				logger.Debugf("%s[%d] AppendEntries to server[%d] success. Update nextIndex[%d] and matchIndex[%d]",
-					rf.state, rf.me, server, rf.nextIndex[server], rf.matchIndex[server])
-
-			} else if reply.Inconsistent {
-				rf.nextIndex[server] = reply.FirstIndex
-				if reply.FirstIndex == 0 {
-					rf.nextIndex[server] = 1
-				}
-				logger.Debugf("%s[%d] AppendEntries to server[%d] fail. Decrement nextIndex[%d] and try again. ",
-					rf.state, rf.me, server, rf.nextIndex[server])
-				select {
-				case (*rf.logReplicaChan)[server] <- true:
-					break
-				default:
-				}
-			}
-		}
-	}
-	rf.stateCond.L.Unlock()
-	return ok
-}
-
-type Snapshot struct {
-	LastIncludedIndex int
-	LastIncludedTerm  int
-	State             interface{}
-}
-
-type InstallSnapshotArgs struct {
-	Term              int
-	LeaderId          int
-	LastIncludedIndex int
-	LastIncludedTerm  int
-	Offset            int
-	Data              []byte
-	Done              bool
-}
-
-type InstallSnapshotReply struct {
-	Term int
-}
-
-func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) error {
-	rf.stateCond.L.Lock()
-	if args.Term < *rf.CurrentTerm {
-		logger.Debugf("%s[%d] received a InstallSnapshot from Stale Leader[%d] in Term[%d]. Send newer Term[%d] to force it step down.",
-			rf.state, rf.me, args.LeaderId, args.Term, *rf.CurrentTerm)
-		reply.Term = *rf.CurrentTerm
-	} else {
-		rf.leaderHeartBeat = true
-		if args.Term > *rf.CurrentTerm {
-			logger.Debugf("Stale %s[%d] received a InstallSnapshot from Leader[%d] in Term[%d] with newer Term[%d]. Step down.",
-				rf.state, rf.me, args.LeaderId, *rf.CurrentTerm, args.Term)
-			*rf.CurrentTerm = args.Term
-			rf.VotedFor = nil
-			rf.toState(Follower)
-		} else if rf.state == Candidate {
-			logger.Debugf("Stale %s[%d] received a InstallSnapshot from Leader[%d] in Term[%d]. Step down.",
-				rf.state, rf.me, args.LeaderId, *rf.CurrentTerm, args.Term)
-			rf.toState(Follower)
-		}
-
-		logger.Debugf("%s[%d] received a snapshot chunk from Leader[%d] at offset[%d].",
-			rf.state, rf.me, args.LeaderId, args.Offset)
-		if args.Offset == 0 {
-			rf.snapshotBuffer = make([]byte, 0)
-		}
-		for len(rf.snapshotBuffer) < args.Offset {
-			rf.snapshotBuffer = append(rf.snapshotBuffer, byte(0))
-		}
-		for i, e := range args.Data {
-			if len(rf.snapshotBuffer) > i+args.Offset {
-				rf.snapshotBuffer[i+args.Offset] = e
-			} else {
-				rf.snapshotBuffer = append(rf.snapshotBuffer, e)
-			}
-		}
-		if args.Done {
-			logger.Debugf("%s[%d] has received all snapshot chunks, persist snapshot, apply it and discard covered logs.",
-				rf.state, rf.me)
-			rf.persister.SaveSnapshot(rf.snapshotBuffer)
-
-			rf.loadSnapshot(rf.persister.ReadSnapshot())
-			rf.persist()
-			go func() {
-				rf.snapshotApplyChan <- rf.persister.ReadSnapshot()
-			}()
-			rf.snapshotBuffer = nil
-		}
-	}
-	rf.stateCond.L.Unlock()
-	return nil
-}
-
-func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
-	snapshot := args.Data
-	for offset := 0; offset < len(snapshot); offset += SnapshotChunkSize {
-		args.Offset = offset
-		if offset+SnapshotChunkSize >= len(snapshot) {
-			args.Data = snapshot[offset:]
-			args.Done = true
-		} else {
-			args.Data = snapshot[offset:offset+SnapshotChunkSize]
-			args.Done = false
-		}
-		reply = new(InstallSnapshotReply)
-		for !rf.peers.GetEnd(server).Call("Raft.InstallSnapshot", args, reply) {
-			rf.stateCond.L.Lock()
-			if rf.state != Leader {
-				rf.stateCond.L.Unlock()
-				return false
-			}
-			reply = new(InstallSnapshotReply)
-			rf.stateCond.L.Unlock()
-		}
-		rf.stateCond.L.Lock()
-		if rf.state == Leader {
-			if reply.Term > *rf.CurrentTerm {
-				logger.Debugf("%s[%d] received a InstallSnapshotReply in Term[%d] with newer Term[%d] from server[%d]. Step down.",
-					rf.state, rf.me, *rf.CurrentTerm, reply.Term, server)
-				*rf.CurrentTerm = reply.Term
-				rf.toState(Follower)
-				rf.leaderHeartBeat = true
-			} else if args.Done {
-				rf.nextIndex[server] = args.LastIncludedIndex + 1
-				if rf.matchIndex[server] != args.LastIncludedIndex {
-					rf.matchIndex[server] = args.LastIncludedIndex
-					rf.updateCommitIndex()
-					rf.commitCond.Broadcast()
-				}
-				logger.Debugf("%s[%d] received a InstallSnapshotReply in Term[%d] with newer Term[%d] from server[%d]. Install snapshot at Offset[%d] successfully. Update nextIndex[%d] and matchIndex[%d]",
-					rf.state, rf.me, *rf.CurrentTerm, reply.Term, server, offset, rf.nextIndex[server], rf.matchIndex[server])
-			} else {
-				logger.Debugf("%s[%d] received a InstallSnapshotReply in Term[%d] with newer Term[%d] from server[%d]. Install snapshot at Offset[%d] successfully.",
-					rf.state, rf.me, *rf.CurrentTerm, reply.Term, server, offset)
-			}
-		}
-		rf.stateCond.L.Unlock()
-	}
-
-	return true
-}
-
 func (rf *Raft) Snapshot() {
 
 	go func() {
 		rf.snapshotChan <- true
 	}()
-}
-
-func (rf *Raft) storeSnapshot(snapshot Snapshot) {
-	if snapshot.LastIncludedIndex <= rf.lastSnapshotIndex {
-		return
-	}
-	w := new(bytes.Buffer)
-	e := gob.NewEncoder(w)
-	e.Encode(snapshot.LastIncludedIndex)
-	e.Encode(snapshot.LastIncludedTerm)
-	e.Encode(snapshot.State)
-	content := w.Bytes()
-	logger.Debugf("%s[%d] store Snapshot at LastSnapshotIndex[%d] with LastSnapshotTerm[%d] in Term[%d]",
-		rf.state, rf.me, rf.lastSnapshotIndex, snapshot.LastIncludedTerm, *rf.CurrentTerm)
-	rf.persister.SaveSnapshot(content)
-
-	//Discard logs covered by snapshot
-	newLog := new([]Entry)
-	*newLog = append(*newLog, Entry{Term: snapshot.LastIncludedTerm, Index: snapshot.LastIncludedIndex})
-	*newLog = append(*newLog, (*rf.Log)[snapshot.LastIncludedIndex+1-rf.lastSnapshotIndex:]...)
-	rf.Log = newLog
-
-	rf.lastSnapshotIndex = snapshot.LastIncludedIndex
-	rf.lastSnapshotTerm = snapshot.LastIncludedTerm
-}
-
-func (rf *Raft) loadSnapshot(data []byte) {
-	r := bytes.NewBuffer(data)
-	d := gob.NewDecoder(r)
-	snapshot := Snapshot{}
-	d.Decode(&snapshot.LastIncludedIndex)
-	d.Decode(&snapshot.LastIncludedTerm)
-	rf.commitIndex = snapshot.LastIncludedIndex
-	rf.lastApplied = snapshot.LastIncludedIndex
-
-	newLog := new([]Entry)
-	*newLog = append(*newLog, Entry{Term: snapshot.LastIncludedTerm, Index: snapshot.LastIncludedIndex})
-	if rf.lastSnapshotIndex < snapshot.LastIncludedIndex && snapshot.LastIncludedIndex < rf.lastNewEntryIndex {
-		*newLog = append(*newLog, (*rf.Log)[snapshot.LastIncludedIndex+1-rf.lastSnapshotIndex:]...)
-		rf.Log = newLog
-	} else {
-		rf.lastNewEntryIndex = snapshot.LastIncludedIndex
-		rf.Log = newLog
-	}
-
-	rf.lastSnapshotIndex = snapshot.LastIncludedIndex
-	rf.lastSnapshotTerm = snapshot.LastIncludedTerm
-
-	logger.Debugf("%s[%d] load Snapshot, LastIncludedIndex[%d], LastIncludedTerm[%d]",
-		rf.state, rf.me, snapshot.LastIncludedIndex, snapshot.LastIncludedTerm)
-}
-
-func (rf *Raft) notifyReplica() {
-
-	for i := 0; i < rf.peers.Len(); i++ {
-		if i != rf.me {
-			go func(i int) {
-				rf.stateCond.L.Lock()
-				if rf.state == Leader && len((*rf.logReplicaChan)[i]) == 0 {
-					select {
-					case (*rf.logReplicaChan)[i] <- true:
-						break
-					default:
-					}
-				}
-				rf.stateCond.L.Unlock()
-			}(i)
-		}
-	}
 }
 
 func (rf *Raft) hearBeat() {
@@ -665,59 +248,6 @@ func (rf *Raft) hearBeat() {
 		rf.notifyReplica()
 		rf.stateCond.L.Unlock()
 		time.Sleep(time.Duration(HeartBeatInterval) * time.Millisecond)
-	}
-}
-
-func (rf *Raft) electionTimeout() {
-	for {
-		rf.stateCond.L.Lock()
-		for rf.state == Leader {
-			rf.stateCond.Wait()
-		}
-		if rf.state == Dead {
-			break
-		}
-		if rf.leaderHeartBeat {
-			rf.leaderHeartBeat = false
-		} else {
-			rf.initiateElection()
-		}
-		interval := rand.Intn(ElectionTimeoutMax-ElectionTimeoutMin) + ElectionTimeoutMin
-		if rf.declined {
-			interval = ElectionTimeoutMax
-		} else {
-			interval = rand.Intn(ElectionTimeoutMax-ElectionTimeoutMin) + ElectionTimeoutMin
-		}
-		rf.declined = false
-		rf.stateCond.L.Unlock()
-
-		time.Sleep(time.Duration(interval) * time.Millisecond)
-	}
-}
-
-func (rf *Raft) initiateElection() {
-	logger.Debugf("%s[%d] election timeout, convert to new Term[%d] and initiate a Election.",
-		rf.state, rf.me, *rf.CurrentTerm+1)
-	*rf.CurrentTerm++
-	rf.VotedFor = new(int)
-	*rf.VotedFor = rf.me
-	rf.voteCount = 1
-	rf.declined = false
-	rf.toState(Candidate)
-	for i := 0; i < rf.peers.Len(); i++ {
-		if i != rf.me {
-			args := new(RequestVoteArgs)
-			args.Term = *rf.CurrentTerm
-			args.CandidateId = rf.me
-			args.LastLogIndex = rf.lastNewEntryIndex
-			if args.LastLogIndex < 0 {
-				args.LastLogTerm = -1
-			} else {
-				args.LastLogTerm = rf.getEntry(args.LastLogIndex).Term
-			}
-			reply := new(RequestVoteReply)
-			go rf.sendRequestVote(i, args, reply)
-		}
 	}
 }
 
@@ -740,81 +270,6 @@ func (rf *Raft) endLeader() {
 		rf.onLeaderEndCallback()
 	}
 	go rf.endReplications()
-}
-
-func (rf *Raft) replicateLogs() {
-	rf.replicaEnd.Wait()
-	logReplicaChan := make([] chan bool, rf.peers.Len())
-	rf.logReplicaChan = &logReplicaChan
-	for i := 0; i < rf.peers.Len(); i++ {
-		if i != rf.me {
-			(*rf.logReplicaChan)[i] = make(chan bool)
-			go rf.replicateLogsToServer(i)
-		}
-	}
-
-}
-
-func (rf *Raft) replicateLogsToServer(i int) {
-	rf.replicaEnd.Add(1)
-
-	for {
-		proceed := <-(*rf.logReplicaChan)[i]
-
-		if !proceed {
-			break
-		}
-
-		rf.stateCond.L.Lock()
-		if rf.state != Leader {
-			rf.stateCond.L.Unlock()
-			continue
-		}
-
-		if rf.nextIndex[i] > rf.lastSnapshotIndex {
-			args := new(AppendEntriesArgs)
-			reply := new(AppendEntriesReply)
-			args.Term = *rf.CurrentTerm
-			args.LeaderId = rf.me
-			args.PrevLogIndex = rf.nextIndex[i] - 1
-			args.LeaderCommit = rf.commitIndex
-			if args.PrevLogIndex >= 0 && rf.lastNewEntryIndex >= args.PrevLogIndex {
-				args.PrevLogTerm = rf.getEntry(args.PrevLogIndex).Term
-			} else {
-				args.PrevLogTerm = 0
-			}
-			args.Entries = (*rf.Log)[(rf.nextIndex[i] - rf.lastSnapshotIndex):(rf.lastNewEntryIndex + 1 - rf.lastSnapshotIndex)]
-			go rf.sendAppendEntries(i, args, reply)
-		} else {
-			args := new(InstallSnapshotArgs)
-			reply := new(InstallSnapshotReply)
-			args.Term = *rf.CurrentTerm
-			args.LastIncludedIndex = rf.lastSnapshotIndex
-			args.LastIncludedTerm = rf.lastSnapshotTerm
-			args.LeaderId = rf.me
-			args.Data = rf.persister.ReadSnapshot()
-			go rf.sendInstallSnapshot(i, args, reply)
-		}
-
-		rf.stateCond.L.Unlock()
-	}
-	rf.replicaEnd.Done()
-}
-
-func (rf *Raft) endReplications() {
-	for i := 0; i < rf.peers.Len(); i++ {
-		if i != rf.me {
-			(*rf.logReplicaChan)[i] <- false
-		}
-	}
-	rf.stateCond.L.Lock()
-
-	for i, ch := range *rf.logReplicaChan {
-		if i != rf.me {
-			close(ch)
-		}
-	}
-	rf.stateCond.L.Unlock()
 }
 
 func (rf *Raft) commitLogs() {
@@ -883,8 +338,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := true
-
-	// Your code here (2B).
 
 	rf.stateCond.L.Lock()
 	if rf.state == Leader {
@@ -990,8 +443,6 @@ func Make(peers rpc.Peers, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister)
-	logging.SetLevel(logging.INFO, "raft")
-	logging.SetLevel(logging.INFO, "rpc/mock")
 
 	go rf.hearBeat()
 	go rf.electionTimeout()

@@ -4,46 +4,61 @@ import (
 	"data"
 	"github.com/op/go-logging"
 	"os"
+	"raft"
 	"rpc/native"
 	"strings"
-	"raft"
 )
 
 var logger = logging.MustGetLogger("main")
 
 func main() {
-	addresses := make(map[string]string)
+	logging.SetLevel(logging.INFO, "rpc/native")
 	gleiphirId := os.Getenv("GLEIPHIR_ID")
 	gleiphirServers := os.Getenv("GLEIPHIR_SERVERS")
 
 	logger.Infof("Received GLEIPHIR_ID=%s", gleiphirId)
-	logger.Infof("Received GLEIPHIR_SERVERS=%s", gleiphirServers)
+	var me int
 
-	for _, s := range strings.Split(gleiphirServers, " ") {
+	var serverNames []string
+	var addresses []string
+
+	for index, s := range strings.Split(gleiphirServers, " ") {
 		p := strings.Split(s, "=")
-		addresses[p[0]] = p[1]
+		serverNames = append(serverNames, p[0])
+		addresses = append(addresses, p[1])
+		if p[0] == gleiphirId {
+			me = index
+		}
 	}
+	num := len(serverNames)
+	logger.Infof("Received GLEIPHIR_SERVERS:%+v", addresses)
 
-	config := new(native.Peers)
-	network := native.MakeNetwork()
-	config.Ends = make([]*native.ClientEnd, len(addresses))
-	var z *raft.Raft
-
-	i := 0
 	applyCh := make(chan raft.ApplyMsg)
 	persister := data.MakeMemoryPersister()
-	for id, address := range addresses {
-		endName := "end-" + id
-		config.Ends[i] = network.MakeEnd(endName)
-		server := native.MakeServer(address)
-		if id == gleiphirId {
-			z = raft.Make(config, i, persister, applyCh)
-			service := native.MakeService(z)
-			server.AddService(service)
-		}
-		network.AddServer(id, server)
-		network.Connect(endName, id)
-		i++
+
+	// initiate native rpc
+	peers := new(native.Peers)
+	network := native.MakeNetwork()
+	peers.Ends = make([]*native.ClientEnd, num)
+
+	for i := 0; i < num; i++ {
+		endName := "end-" + serverNames[i]
+		peers.Ends[i] = network.MakeEnd(endName)
 	}
 
+	var localServer *native.Server
+	rf := raft.Make(peers, me, persister, applyCh)
+	for i := 0; i < num; i++ {
+		endName := "end-" + serverNames[i]
+		server := native.MakeServer(addresses[i])
+		if i == me {
+			localServer = server
+			service := native.MakeService(rf)
+			server.AddService(service)
+		}
+		network.AddServer(serverNames[i], server)
+		network.Connect(endName, serverNames[i])
+	}
+
+	localServer.Start()
 }

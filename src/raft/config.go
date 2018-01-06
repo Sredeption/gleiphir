@@ -10,16 +10,17 @@ package raft
 
 import "log"
 import "sync"
-import "testing"
 import "runtime"
 import "crypto/rand"
 import "encoding/base64"
 import "sync/atomic"
 import "time"
 import (
+	"data"
 	"fmt"
 	"rpc/mock"
-	"data"
+	"github.com/stretchr/testify/suite"
+	"testing"
 )
 
 func randString(n int) string {
@@ -45,7 +46,7 @@ type config struct {
 
 var nCpuOnce sync.Once
 
-func makeConfig(t *testing.T, n int, unreliable bool) *config {
+func makeConfig(t suite.TestingSuite, n int, unreliable bool) *config {
 	nCpuOnce.Do(func() {
 		if runtime.NumCPU() < 2 {
 			fmt.Printf("warning: only one CPU, which may conceal locking bugs\n")
@@ -53,7 +54,7 @@ func makeConfig(t *testing.T, n int, unreliable bool) *config {
 	})
 	runtime.GOMAXPROCS(4)
 	cfg := &config{}
-	cfg.t = t
+	cfg.t = t.T()
 	cfg.net = mock.MakeNetwork()
 	cfg.n = n
 	cfg.applyErr = make([]string, cfg.n)

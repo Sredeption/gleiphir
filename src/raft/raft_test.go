@@ -4,20 +4,34 @@ package raft
 // Raft tests.
 //
 
-import "testing"
-import "fmt"
-import "time"
-import "math/rand"
-import "sync/atomic"
-import "sync"
+import (
+	"sync"
+	"github.com/stretchr/testify/suite"
+	"time"
+	"testing"
+	"fmt"
+	"sync/atomic"
+	"math/rand"
+	"github.com/op/go-logging"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
 
-func TestInitialElection(t *testing.T) {
+type RaftTestSuite struct {
+	suite.Suite
+}
+
+func TestRaftTestSuite(t *testing.T) {
+	logging.SetLevel(logging.INFO, "rpc/mock")
+	logging.SetLevel(logging.INFO, "raft")
+	suite.Run(t, new(RaftTestSuite))
+}
+
+func (s *RaftTestSuite) TestInitialElection() {
 	servers := 3
-	cfg := makeConfig(t, servers, false)
+	cfg := makeConfig(s, servers, false)
 	defer cfg.cleanup()
 
 	fmt.Printf("Test Raft: initial election ...\n")
@@ -36,9 +50,9 @@ func TestInitialElection(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestReElection(t *testing.T) {
+func (s *RaftTestSuite) TestReElection() {
 	servers := 3
-	cfg := makeConfig(t, servers, false)
+	cfg := makeConfig(s, servers, false)
 	defer cfg.cleanup()
 
 	fmt.Printf("Test Raft: election after network failure ...\n")
@@ -72,32 +86,32 @@ func TestReElection(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestBasicAgree(t *testing.T) {
+func (s *RaftTestSuite) TestBasicAgree() {
 	servers := 5
-	cfg := makeConfig(t, servers, false)
+	cfg := makeConfig(s, servers, false)
 	defer cfg.cleanup()
 
 	fmt.Printf("Test Raft: basic agreement ...\n")
 
-	iters := 3
-	for index := 1; index < iters+1; index++ {
+	iteration := 3
+	for index := 1; index < iteration+1; index++ {
 		nd, _ := cfg.nCommitted(index)
 		if nd > 0 {
-			t.Fatalf("some have committed before Start()")
+			s.T().Fatalf("some have committed before Start()")
 		}
 
-		xindex := cfg.one(index*100, servers)
-		if xindex != index {
-			t.Fatalf("got index %v but expected %v", xindex, index)
+		xIndex := cfg.one(index*100, servers)
+		if xIndex != index {
+			s.T().Fatalf("got index %v but expected %v", xIndex, index)
 		}
 	}
 
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestFailAgree(t *testing.T) {
+func (s *RaftTestSuite) TestFailAgree() {
 	servers := 3
-	cfg := makeConfig(t, servers, false)
+	cfg := makeConfig(s, servers, false)
 	defer cfg.cleanup()
 
 	fmt.Printf("Test Raft: agreement despite follower disconnection ...\n")
@@ -126,9 +140,9 @@ func TestFailAgree(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestFailNoAgree(t *testing.T) {
+func (s *RaftTestSuite) TestFailNoAgree() {
 	servers := 5
-	cfg := makeConfig(t, servers, false)
+	cfg := makeConfig(s, servers, false)
 	defer cfg.cleanup()
 
 	fmt.Printf("Test Raft: no agreement if too many followers disconnect ...\n")
@@ -143,17 +157,17 @@ func TestFailNoAgree(t *testing.T) {
 
 	index, _, ok := cfg.rafts[leader].Start(20)
 	if ok != true {
-		t.Fatalf("leader rejected Start()")
+		s.T().Fatalf("leader rejected Start()")
 	}
 	if index != 2 {
-		t.Fatalf("expected index 2, got %v", index)
+		s.T().Fatalf("expected index 2, got %v", index)
 	}
 
 	time.Sleep(2 * RaftElectionTimeout)
 
 	n, _ := cfg.nCommitted(index)
 	if n > 0 {
-		t.Fatalf("%v committed but no majority", n)
+		s.T().Fatalf("%v committed but no majority", n)
 	}
 
 	// repair
@@ -167,10 +181,10 @@ func TestFailNoAgree(t *testing.T) {
 	leader2 := cfg.checkOneLeader()
 	index2, _, ok2 := cfg.rafts[leader2].Start(30)
 	if ok2 == false {
-		t.Fatalf("leader2 rejected Start()")
+		s.T().Fatalf("leader2 rejected Start()")
 	}
 	if index2 < 2 || index2 > 3 {
-		t.Fatalf("unexpected index %v", index2)
+		s.T().Fatalf("unexpected index %v", index2)
 	}
 
 	cfg.one(1000, servers)
@@ -178,9 +192,9 @@ func TestFailNoAgree(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestConcurrentStarts(t *testing.T) {
+func (s *RaftTestSuite) TestConcurrentStarts() {
 	servers := 3
-	cfg := makeConfig(t, servers, false)
+	cfg := makeConfig(s, servers, false)
 	defer cfg.cleanup()
 
 	fmt.Printf("Test Raft: concurrent Start()s ...\n")
@@ -242,7 +256,7 @@ loop:
 				}
 				commands = append(commands, ix)
 			} else {
-				t.Fatalf("value %v is not an int", cmd)
+				s.T().Fatalf("value %v is not an int", cmd)
 			}
 		}
 
@@ -264,7 +278,7 @@ loop:
 				}
 			}
 			if ok == false {
-				t.Fatalf("cmd %v missing in %v", x, commands)
+				s.T().Fatalf("cmd %v missing in %v", x, commands)
 			}
 		}
 
@@ -273,15 +287,15 @@ loop:
 	}
 
 	if !success {
-		t.Fatalf("term changed too often")
+		s.T().Fatalf("term changed too often")
 	}
 
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestRejoin(t *testing.T) {
+func (s *RaftTestSuite) TestRejoin() {
 	servers := 3
-	cfg := makeConfig(t, servers, false)
+	cfg := makeConfig(s, servers, false)
 	defer cfg.cleanup()
 
 	fmt.Printf("Test Raft: rejoin of partitioned leader ...\n")
@@ -317,9 +331,9 @@ func TestRejoin(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestBackup(t *testing.T) {
+func (s *RaftTestSuite) TestBackup() {
 	servers := 5
-	cfg := makeConfig(t, servers, false)
+	cfg := makeConfig(s, servers, false)
 	defer cfg.cleanup()
 
 	fmt.Printf("Test Raft: leader backs up quickly over incorrect follower logs ...\n")
@@ -389,9 +403,9 @@ func TestBackup(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestCount(t *testing.T) {
+func (s *RaftTestSuite) TestCount() {
 	servers := 3
-	cfg := makeConfig(t, servers, false)
+	cfg := makeConfig(s, servers, false)
 	defer cfg.cleanup()
 
 	fmt.Printf("Test Raft: RPC counts aren't too high ...\n")
@@ -408,7 +422,7 @@ func TestCount(t *testing.T) {
 	total1 := rpcs()
 
 	if total1 > 30 || total1 < 1 {
-		t.Fatalf("too many or few RPCs (%v) to elect initial leader\n", total1)
+		s.T().Fatalf("too many or few RPCs (%v) to elect initial leader\n", total1)
 	}
 
 	var total2 int
@@ -443,7 +457,7 @@ loop:
 				continue loop
 			}
 			if startI+i != index1 {
-				t.Fatalf("Start() failed")
+				s.T().Fatalf("Start() failed")
 			}
 		}
 
@@ -454,7 +468,7 @@ loop:
 					// term changed -- try again
 					continue loop
 				}
-				t.Fatalf("wrong value %v committed for index %v; expected %v\n", cmd, startI+i, commands)
+				s.T().Fatalf("wrong value %v committed for index %v; expected %v\n", cmd, startI+i, commands)
 			}
 		}
 
@@ -474,7 +488,7 @@ loop:
 		}
 
 		if total2-total1 > (iteration+1+3)*3 {
-			t.Fatalf("too many RPCs (%v) for %v entries\n", total2-total1, iteration)
+			s.T().Fatalf("too many RPCs (%v) for %v entries\n", total2-total1, iteration)
 		}
 
 		success = true
@@ -482,7 +496,7 @@ loop:
 	}
 
 	if !success {
-		t.Fatalf("term changed too often")
+		s.T().Fatalf("term changed too often")
 	}
 
 	time.Sleep(RaftElectionTimeout)
@@ -493,15 +507,15 @@ loop:
 	}
 
 	if total3-total2 > 3*20 {
-		t.Fatalf("too many RPCs (%v) for 1 second of idleness\n", total3-total2)
+		s.T().Fatalf("too many RPCs (%v) for 1 second of idleness\n", total3-total2)
 	}
 
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestPersist1(t *testing.T) {
+func (s *RaftTestSuite) TestPersist1() {
 	servers := 3
-	cfg := makeConfig(t, servers, false)
+	cfg := makeConfig(s, servers, false)
 	defer cfg.cleanup()
 
 	fmt.Printf("Test Raft: basic persistence ...\n")
@@ -545,9 +559,9 @@ func TestPersist1(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestPersist2(t *testing.T) {
+func (s *RaftTestSuite) TestPersist2() {
 	servers := 5
-	cfg := makeConfig(t, servers, false)
+	cfg := makeConfig(s, servers, false)
 	defer cfg.cleanup()
 
 	fmt.Printf("Test Raft: more persistence ...\n")
@@ -591,9 +605,9 @@ func TestPersist2(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestPersist3(t *testing.T) {
+func (s *RaftTestSuite) TestPersist3() {
 	servers := 3
-	cfg := makeConfig(t, servers, false)
+	cfg := makeConfig(s, servers, false)
 	defer cfg.cleanup()
 
 	fmt.Printf("Test Raft: partitioned leader and one follower crash, leader restarts ...\n")
@@ -631,9 +645,9 @@ func TestPersist3(t *testing.T) {
 // The leader in a new term may try to finish replicating log entries that
 // haven't been committed yet.
 //
-func TestFigure8(t *testing.T) {
+func (s *RaftTestSuite) TestFigure8() {
 	servers := 5
-	cfg := makeConfig(t, servers, false)
+	cfg := makeConfig(s, servers, false)
 	defer cfg.cleanup()
 
 	fmt.Printf("Test Raft: Figure 8 ...\n")
@@ -687,9 +701,9 @@ func TestFigure8(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestUnreliableAgree(t *testing.T) {
+func (s *RaftTestSuite) TestUnreliableAgree() {
 	servers := 5
-	cfg := makeConfig(t, servers, true)
+	cfg := makeConfig(s, servers, true)
 	defer cfg.cleanup()
 
 	fmt.Printf("Test Raft: unreliable agreement ...\n")
@@ -699,9 +713,9 @@ func TestUnreliableAgree(t *testing.T) {
 	for iteration := 1; iteration < 50; iteration++ {
 		for j := 0; j < 4; j++ {
 			wg.Add(1)
-			go func(iters, j int) {
+			go func(iteration, j int) {
 				defer wg.Done()
-				cfg.one((100*iters)+j, 1)
+				cfg.one((100*iteration)+j, 1)
 			}(iteration, j)
 		}
 		cfg.one(iteration, 1)
@@ -716,9 +730,9 @@ func TestUnreliableAgree(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestFigure8Unreliable(t *testing.T) {
+func (s *RaftTestSuite) TestFigure8Unreliable() {
 	servers := 5
-	cfg := makeConfig(t, servers, true)
+	cfg := makeConfig(s, servers, true)
 	defer cfg.cleanup()
 
 	fmt.Printf("Test Raft: Figure 8 (unreliable) ...\n")
@@ -771,7 +785,7 @@ func TestFigure8Unreliable(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func internalChurn(t *testing.T, unreliable bool) {
+func internalChurn(s *RaftTestSuite, unreliable bool) {
 
 	if unreliable {
 		fmt.Printf("Test Raft: unreliable churn ...\n")
@@ -780,7 +794,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 	}
 
 	servers := 5
-	cfg := makeConfig(t, servers, unreliable)
+	cfg := makeConfig(s, servers, unreliable)
 	defer cfg.cleanup()
 
 	stop := int32(0)
@@ -790,7 +804,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 		var ret []int
 		ret = nil
 		defer func() { ch <- ret }()
-		values := []int{}
+		var values []int
 		for atomic.LoadInt32(&stop) == 0 {
 			x := rand.Int()
 			index := -1
@@ -882,7 +896,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 	for i := 0; i < nCli; i++ {
 		vv := <-cha[i]
 		if vv == nil {
-			t.Fatal("client failed")
+			s.T().Fatal("client failed")
 		}
 		values = append(values, vv...)
 	}
@@ -897,7 +911,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 		if vi, ok := v.(int); ok {
 			really = append(really, vi)
 		} else {
-			t.Fatalf("not an int")
+			s.T().Fatalf("not an int")
 		}
 	}
 
@@ -916,10 +930,10 @@ func internalChurn(t *testing.T, unreliable bool) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestReliableChurn2C(t *testing.T) {
-	internalChurn(t, false)
+func (s *RaftTestSuite) TestReliableChurn() {
+	internalChurn(s, false)
 }
 
-func TestUnreliableChurn2C(t *testing.T) {
-	internalChurn(t, true)
+func (s *RaftTestSuite) TestUnreliableChurn() {
+	internalChurn(s, true)
 }

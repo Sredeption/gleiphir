@@ -8,16 +8,18 @@ type ClientEnd struct {
 }
 
 func (e *ClientEnd) Call(svcMethod string, args interface{}, reply interface{}) bool {
-	c, errDial := rpc.Dial("unix", e.address)
-	if errDial != nil {
+	c, dialErr := rpc.Dial("tcp", e.address)
+	if dialErr != nil {
+		logger.Debug(dialErr)
 		return false
 	}
 	defer c.Close()
 
-	errCall := c.Call(svcMethod, args, reply)
-	if errCall != nil {
-		return true
+	callErr := c.Call(svcMethod, args, reply)
+	if callErr != nil {
+		logger.Debug(callErr)
+		return false
 	}
 
-	return false
+	return true
 }

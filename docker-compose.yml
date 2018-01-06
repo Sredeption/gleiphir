@@ -1,23 +1,23 @@
 version: '3'
 
 services:
-  node1:
+  chain1:
     image: issac/gleiphir
-    hostname: node1
+    hostname: chain1
     environment:
-      GLEIPHIR_ID: node1
-      GLEIPHIR_SERVERS: node1=localhost:7888 node2=node2:7888 node3=node3:7888
+      GLEIPHIR_ID: chain1
+      GLEIPHIR_SERVERS: chain1=0.0.0.0:7888 chain2=chain2:7888 chain3=chain3:7888
 
-  node2:
+  chain2:
     image: issac/gleiphir
-    hostname: node2
+    hostname: chain2
     environment:
-      GLEIPHIR_ID: node2
-      GLEIPHIR_SERVERS: node1=node1:7888 node2=localhost:7888 node3=node3:7888
+      GLEIPHIR_ID: chain2
+      GLEIPHIR_SERVERS: chain1=chain1:7888 chain2=0.0.0.0:7888 chain3=chain3:7888
 
-  node3:
+  chain3:
     image: issac/gleiphir
-    hostname: node3
+    hostname: chain3
     environment:
-      GLEIPHIR_ID: node3
-      GLEIPHIR_SERVERS: node1=node1:7888 node2=node2:7888 node3=localhost:7888
+      GLEIPHIR_ID: chain3
+      GLEIPHIR_SERVERS: chain1=chain1:7888 chain2=chain2:7888 chain3=0.0.0.0:7888

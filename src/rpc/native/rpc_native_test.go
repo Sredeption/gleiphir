@@ -67,10 +67,10 @@ func TestBasic(t *testing.T) {
 	js := &JunkServer{}
 	svc := MakeService(js)
 
-	rs := MakeServer("localhost:7778")
+	rs := MakeServer("localhost:7888")
 	rs.AddService(svc)
 	network.AddServer("server99", rs)
-	go rs.start()
+	go rs.Start()
 
 	time.Sleep(10 * time.Millisecond)
 
@@ -92,6 +92,6 @@ func TestBasic(t *testing.T) {
 		}
 	}
 
-	rs.stop()
+	rs.Stop()
 
 }

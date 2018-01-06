@@ -1,6 +1,8 @@
-hash: 3db27418912ea9485d821cd71b6c73bb495a37767f12d96bbdc49eb76780c850
-updated: 2018-01-05T20:52:11.540684617+08:00
+hash: 82796669ca2cf848d2bd1e6c10ce3744314b2820efb398d27bb94b0a97b0e661
+updated: 2018-01-06T00:34:48.892676705+08:00
 imports:
 - name: github.com/op/go-logging
   version: 970db520ece77730c7e4724c61121037378659d9
+- name: github.com/stretchr/testify
+  version: 87b1dfb5b2fa649f52695dd9eae19abe404a4308
 testImports: []
